@@ -1,0 +1,6 @@
+.pgpass
+*.env
+*.pem
+*.key
+*.dump
+.venv/
