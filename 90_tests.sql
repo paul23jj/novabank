@@ -20,7 +20,7 @@ INSERT INTO core.transactions (account_id, tx_type, amount) VALUES (33, 'DEPOSIT
 \echo '=== E6.2 Grand livre immuable (3 refus) ==='
 UPDATE core.transactions SET amount = 1 WHERE tx_id = 1;
 DELETE FROM core.transactions WHERE tx_id = 1;
-TRUNCATE core.transactions;
+TRUNCATE core.transactions, core.fraud_alerts;
 
 \echo '=== E6.3 Fraude : retrait de 5 000 déclenche une alerte, 4 999,99 non ==='
 SELECT count(*) AS alertes_avant FROM core.fraud_alerts;
