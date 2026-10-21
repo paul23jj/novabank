@@ -20,7 +20,7 @@ ANALYZE core.transactions, core.customers;
 SELECT indexrelname AS index, pg_size_pretty(pg_relation_size(indexrelid)) AS taille
 FROM pg_stat_user_indexes WHERE schemaname = 'core' ORDER BY indexrelname;
 
--- Un index inutile : 4 valeurs différentes seulement, EXPLAIN préfère lire toute la table
+-- Un index inutile : tx_type n a que 4 valeurs, le plan n est pas plus rapide (voir EXPLAIN)
 CREATE INDEX idx_tx_type_inutile ON core.transactions (tx_type);
 ANALYZE core.transactions;
 EXPLAIN (ANALYZE, BUFFERS) SELECT sum(amount) FROM core.transactions WHERE tx_type = 'DEPOSIT';
