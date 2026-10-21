@@ -1,0 +1,233 @@
+Pager usage is off.
+SET ROLE bank_owner;
+SET
+SELECT account_id AS acc  FROM core.accounts WHERE status = 'ACTIVE' ORDER BY balance DESC LIMIT 1 
+SELECT account_id AS acc2 FROM core.accounts WHERE status = 'ACTIVE' ORDER BY balance DESC OFFSET 1 LIMIT 1 
+=== E6.1 Le solde se met à jour seul (OK) ===
+SELECT balance FROM core.accounts WHERE account_id = 2661;
+ balance  
+----------
+ 90147.34
+(1 row)
+
+INSERT INTO core.transactions (account_id, tx_type, amount) VALUES (2661, 'DEPOSIT', 100) RETURNING tx_id, balance_after;
+  tx_id  | balance_after 
+---------+---------------
+ 1000001 |      90247.34
+(1 row)
+
+INSERT 0 1
+SELECT balance FROM core.accounts WHERE account_id = 2661;
+ balance  
+----------
+ 90247.34
+(1 row)
+
+--- refusés : solde insuffisant, compte gelé
+INSERT INTO core.transactions (account_id, tx_type, amount) VALUES (2661, 'WITHDRAWAL', 900000000);
+ERROR:  Solde insuffisant sur le compte 2661
+CONTEXT:  PL/pgSQL function core.fn_tx_balance() line 22 at RAISE
+INSERT INTO core.transactions (account_id, tx_type, amount) VALUES (33, 'DEPOSIT', 10);
+ERROR:  Compte 33 non actif (statut FROZEN)
+CONTEXT:  PL/pgSQL function core.fn_tx_balance() line 14 at RAISE
+=== E6.2 Grand livre immuable (3 refus) ===
+UPDATE core.transactions SET amount = 1 WHERE tx_id = 1;
+ERROR:  Grand livre immuable : UPDATE interdit sur core.transactions
+CONTEXT:  PL/pgSQL function core.fn_ledger_immutable() line 3 at RAISE
+DELETE FROM core.transactions WHERE tx_id = 1;
+ERROR:  Grand livre immuable : DELETE interdit sur core.transactions
+CONTEXT:  PL/pgSQL function core.fn_ledger_immutable() line 3 at RAISE
+TRUNCATE core.transactions, core.fraud_alerts;
+ERROR:  Grand livre immuable : TRUNCATE interdit sur core.transactions
+CONTEXT:  PL/pgSQL function core.fn_ledger_immutable() line 3 at RAISE
+=== E6.3 Fraude : retrait de 5 000 déclenche une alerte, 4 999,99 non ===
+SELECT count(*) AS alertes_avant FROM core.fraud_alerts;
+ alertes_avant 
+---------------
+             0
+(1 row)
+
+INSERT INTO core.transactions (account_id, tx_type, amount) VALUES (2661, 'WITHDRAWAL', 4999.99);
+INSERT 0 1
+SELECT count(*) AS alertes_apres_4999 FROM core.fraud_alerts;
+ alertes_apres_4999 
+--------------------
+                  0
+(1 row)
+
+INSERT INTO core.transactions (account_id, tx_type, amount) VALUES (2661, 'WITHDRAWAL', 5000) RETURNING tx_id;
+  tx_id  
+---------
+ 1000005
+(1 row)
+
+INSERT 0 1
+SELECT alert_id, account_id, tx_id, rule_code, status FROM core.fraud_alerts ORDER BY alert_id DESC LIMIT 1;
+ alert_id | account_id |  tx_id  |    rule_code     | status 
+----------+------------+---------+------------------+--------
+        1 |       2661 | 1000005 | LARGE_WITHDRAWAL | OPEN
+(1 row)
+
+=== E6.4 Audit : qui, quand, avant, après ===
+UPDATE core.accounts SET status = 'FROZEN' WHERE account_id = 7021;
+UPDATE 1
+UPDATE core.accounts SET status = 'ACTIVE' WHERE account_id = 7021;
+UPDATE 1
+SELECT log_id, table_name, operation, old_data->>'status' AS avant, new_data->>'status' AS apres, db_user, changed_at
+FROM audit.audit_log ORDER BY log_id DESC LIMIT 2;
+ log_id |  table_name   | operation | avant  | apres  | db_user  |          changed_at           
+--------+---------------+-----------+--------+--------+----------+-------------------------------
+      5 | core.accounts | UPDATE    | FROZEN | ACTIVE | postgres | 2026-10-21 10:03:29.799838+00
+      4 | core.accounts | UPDATE    | ACTIVE | FROZEN | postgres | 2026-10-21 10:03:29.797743+00
+(2 rows)
+
+=== E6.5 Un virement = 2 écritures ou aucune (refus au COMMIT) ===
+BEGIN;
+BEGIN
+INSERT INTO core.transfers (from_account_id, to_account_id, amount) VALUES (2661, 7021, 5);
+INSERT 0 1
+INSERT INTO core.transactions (account_id, tx_type, amount, transfer_id)
+VALUES (2661, 'TRANSFER_OUT', 5, (SELECT max(transfer_id) FROM core.transfers));
+INSERT 0 1
+COMMIT;
+ERROR:  Le virement 250003 doit avoir exactement 2 écritures
+CONTEXT:  PL/pgSQL function core.fn_tx_two_entries() line 4 at RAISE
+=== E7.1 Virement réussi, par le profil bank_app ===
+SELECT account_id, balance FROM core.accounts WHERE account_id IN (2661, 7021) ORDER BY account_id;
+ account_id | balance  
+------------+----------
+       2661 | 80247.35
+       7021 | 82905.46
+(2 rows)
+
+SET ROLE bank_app;
+SET
+CALL core.sp_virement(2661, 7021, 25.00, 'Test virement', NULL);
+ p_transfer_id 
+---------------
+        250004
+(1 row)
+
+SET ROLE bank_owner;
+SET
+SELECT tx_id, account_id, tx_type, amount, balance_after, transfer_id
+FROM core.transactions WHERE transfer_id = (SELECT max(transfer_id) FROM core.transfers);
+  tx_id  | account_id |   tx_type    | amount | balance_after | transfer_id 
+---------+------------+--------------+--------+---------------+-------------
+ 1000007 |       2661 | TRANSFER_OUT |  25.00 |      80222.35 |      250004
+ 1000008 |       7021 | TRANSFER_IN  |  25.00 |      82930.46 |      250004
+(2 rows)
+
+--- refusés : même compte, montant négatif, solde insuffisant, compte inconnu, compte gelé
+SET ROLE bank_app;
+SET
+CALL core.sp_virement(2661, 2661, 10, 'même compte', NULL);
+ERROR:  Comptes invalides : il faut deux comptes différents
+CONTEXT:  PL/pgSQL function core.sp_virement(bigint,bigint,numeric,text,bigint) line 11 at RAISE
+CALL core.sp_virement(2661, 7021, -5, 'montant négatif', NULL);
+ERROR:  Montant invalide : il doit être strictement positif
+CONTEXT:  PL/pgSQL function core.sp_virement(bigint,bigint,numeric,text,bigint) line 8 at RAISE
+CALL core.sp_virement(2661, 7021, 900000000, 'trop gros', NULL);
+ERROR:  Solde insuffisant sur le compte 2661
+CONTEXT:  PL/pgSQL function core.sp_virement(bigint,bigint,numeric,text,bigint) line 24 at RAISE
+CALL core.sp_virement(2661, 999999999, 10, 'compte inconnu', NULL);
+ERROR:  Compte destinataire 999999999 introuvable
+CONTEXT:  PL/pgSQL function core.sp_virement(bigint,bigint,numeric,text,bigint) line 21 at RAISE
+CALL core.sp_virement(2661, 33, 10, 'compte gelé', NULL);
+ERROR:  Compte destinataire 33 non actif
+CONTEXT:  PL/pgSQL function core.sp_virement(bigint,bigint,numeric,text,bigint) line 23 at RAISE
+=== E7.2 5 virements rapprochés : alerte BURST_TRANSFERS ===
+CALL core.sp_virement(2661, 7021, 1, 'rafale', NULL);
+ p_transfer_id 
+---------------
+        250005
+(1 row)
+
+CALL core.sp_virement(2661, 7021, 1, 'rafale', NULL);
+ p_transfer_id 
+---------------
+        250006
+(1 row)
+
+CALL core.sp_virement(2661, 7021, 1, 'rafale', NULL);
+ p_transfer_id 
+---------------
+        250007
+(1 row)
+
+CALL core.sp_virement(2661, 7021, 1, 'rafale', NULL);
+ p_transfer_id 
+---------------
+        250008
+(1 row)
+
+CALL core.sp_virement(2661, 7021, 1, 'rafale', NULL);
+ p_transfer_id 
+---------------
+        250009
+(1 row)
+
+SET ROLE bank_owner;
+SET
+SELECT alert_id, account_id, rule_code, status FROM core.fraud_alerts WHERE rule_code = 'BURST_TRANSFERS' ORDER BY alert_id DESC LIMIT 2;
+ alert_id | account_id |    rule_code    | status 
+----------+------------+-----------------+--------
+        3 |       2661 | BURST_TRANSFERS | OPEN
+        2 |       2661 | BURST_TRANSFERS | OPEN
+(2 rows)
+
+=== E7.3 Ouverture de compte ===
+SELECT customer_id AS cid_ok FROM core.customers WHERE kyc_status = 'VERIFIED' ORDER BY customer_id LIMIT 1 
+SELECT customer_id AS cid_ko FROM core.customers WHERE kyc_status <> 'VERIFIED' ORDER BY customer_id LIMIT 1 
+SET ROLE bank_app;
+SET
+CALL core.sp_ouvrir_compte(2, 'SAVINGS', 500, NULL);
+ p_account_id 
+--------------
+        15002
+(1 row)
+
+--- refusés : client non vérifié, client inconnu
+CALL core.sp_ouvrir_compte(1, 'SAVINGS', 0, NULL);
+ERROR:  Client 1 non vérifié (KYC : REJECTED)
+CONTEXT:  PL/pgSQL function core.sp_ouvrir_compte(bigint,core.account_type,numeric,bigint) line 13 at RAISE
+CALL core.sp_ouvrir_compte(999999999, 'SAVINGS', 0, NULL);
+ERROR:  Client 999999999 introuvable
+CONTEXT:  PL/pgSQL function core.sp_ouvrir_compte(bigint,core.account_type,numeric,bigint) line 10 at RAISE
+SET ROLE bank_owner;
+SET
+SELECT account_id, customer_id, iban, account_type, balance, status FROM core.accounts ORDER BY account_id DESC LIMIT 1;
+ account_id | customer_id |            iban             | account_type | balance | status 
+------------+-------------+-----------------------------+--------------+---------+--------
+      15002 |           2 | FR7600000000000000000100000 | SAVINGS      |  500.00 | ACTIVE
+(1 row)
+
+=== E7.4 Relevé ===
+SET ROLE bank_app;
+SET
+BEGIN;
+BEGIN
+CALL core.sp_releve(2661, '2026-01-01', '2026-12-31');
+  p_cursor   
+-------------
+ curs_releve
+(1 row)
+
+FETCH 5 FROM curs_releve;
+  tx_id  |          created_at           |   tx_type    | amount | balance_after 
+---------+-------------------------------+--------------+--------+---------------
+ 1000017 | 2026-10-21 10:03:30.286826+00 | TRANSFER_OUT |   1.00 |      80217.35
+ 1000015 | 2026-10-21 10:03:30.214124+00 | TRANSFER_OUT |   1.00 |      80218.35
+ 1000013 | 2026-10-21 10:03:30.134299+00 | TRANSFER_OUT |   1.00 |      80219.35
+ 1000011 | 2026-10-21 10:03:30.053813+00 | TRANSFER_OUT |   1.00 |      80220.35
+ 1000009 | 2026-10-21 10:03:29.972829+00 | TRANSFER_OUT |   1.00 |      80221.35
+(5 rows)
+
+COMMIT;
+COMMIT
+--- refusé : compte inconnu
+CALL core.sp_releve(999999999, '2026-01-01', '2026-12-31');
+ERROR:  Compte 999999999 introuvable
+CONTEXT:  PL/pgSQL function core.sp_releve(bigint,timestamp with time zone,timestamp with time zone,refcursor) line 4 at RAISE
+RESET ROLE;
+RESET

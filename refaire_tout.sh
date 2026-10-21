@@ -32,7 +32,9 @@ done
 
 echo "[3/4] Mots de passe des comptes (tapés ici, jamais stockés dans Git)..."
 for r in bank_owner bank_app analyste_1 support_1 auditeur_1; do
-  sudo -u postgres psql -X -d postgres -c "\password $r"
+    until sudo -u postgres psql -X -d postgres -c "\password $r"; do
+    echo "Les mots de passe diffèrent, recommence."
+  done
 done
 
 echo "[4/4] Tests (les sorties sont gardées dans des fichiers .log)..."

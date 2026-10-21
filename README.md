@@ -68,7 +68,7 @@ Tables : `core.customers`, `core.accounts`, `core.transfers`, `core.transactions
 | Gros retraits | 58 ms | 1,4 ms | partiel (`WHERE`) |
 | Somme d'un mois | 44 ms | 8,4 ms | BRIN sur `created_at` |
 
-Taille : le B-tree fait 30 Mo, le BRIN 24 ko. Un index sur `tx_type` (4 valeurs) est inutile : 81 ms avec l'index, 74 ms sans.
+Taille : le B-tree fait 30 Mo, le BRIN 24 ko. Un index sur `tx_type` (4 valeurs) est inutile : PostgreSQL relit presque toute la table de toute façon (9 880 buffers avec l'index, 9 840 sans) : aucun gain réel, et l'index prend de la place et ralentit les écritures.
 
 ## Limites connues
 - L'historique chargé avant les triggers n'a pas d'alertes de fraude.

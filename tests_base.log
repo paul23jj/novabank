@@ -1,0 +1,125 @@
+Pager usage is off.
+=== E2 : contraintes ===
+SET ROLE bank_owner;
+SET
+INSERT INTO core.customers(first_name,last_name,email,birth_date,kyc_status) VALUES ('Test','Valide','test.valide@example.com','1990-01-01','VERIFIED');
+INSERT 0 1
+INSERT INTO core.customers(first_name,last_name,email,birth_date) VALUES ('A','B','pas-un-email','1990-01-01');
+ERROR:  new row for relation "customers" violates check constraint "ck_customers_email"
+DETAIL:  Failing row contains (10002, A, B, pas-un-email, null, 1990-01-01, PENDING, 1, 2026-10-21 10:03:29.686309+00).
+INSERT INTO core.customers(first_name,last_name,email,birth_date) VALUES ('A','B','test.valide@example.com','1990-01-01');
+ERROR:  duplicate key value violates unique constraint "uq_customers_email"
+DETAIL:  Key (email)=(test.valide@example.com) already exists.
+INSERT INTO core.customers(first_name,last_name,email,birth_date) VALUES ('A','B','mineur@example.com',(current_date - INTERVAL '10 years')::date);
+ERROR:  new row for relation "customers" violates check constraint "ck_customers_adult"
+DETAIL:  Failing row contains (10004, A, B, mineur@example.com, null, 2016-10-21, PENDING, 1, 2026-10-21 10:03:29.686952+00).
+UPDATE core.accounts SET balance = -1 WHERE account_id = 1;
+ERROR:  new row for relation "accounts" violates check constraint "ck_accounts_balance"
+DETAIL:  Failing row contains (1, 1, FR7600000000000000000000001, CHECKING, -1.00, ACTIVE, 2024-02-02 04:41:53.788683+00).
+INSERT INTO core.accounts(customer_id, iban) SELECT 1, iban FROM core.accounts WHERE account_id = 1;
+ERROR:  duplicate key value violates unique constraint "uq_accounts_iban"
+DETAIL:  Key (iban)=(FR7600000000000000000000001) already exists.
+INSERT INTO core.transfers(from_account_id,to_account_id,amount) VALUES (1,1,10);
+ERROR:  new row for relation "transfers" violates check constraint "ck_transfers_diff"
+DETAIL:  Failing row contains (250001, 1, 1, 10.00, null, 2026-10-21 10:03:29.688996+00).
+INSERT INTO core.transfers(from_account_id,to_account_id,amount) VALUES (1,2,-5);
+ERROR:  new row for relation "transfers" violates check constraint "ck_transfers_amount"
+DETAIL:  Failing row contains (250002, 1, 2, -5.00, null, 2026-10-21 10:03:29.689485+00).
+RESET ROLE;
+RESET
+=== E3 : droits (OK ou permission denied) ===
+SET ROLE analyste_1;
+SET
+SELECT count(*) FROM core.accounts;
+ count 
+-------
+ 15000
+(1 row)
+
+SELECT birth_date FROM core.customers LIMIT 1;
+ birth_date 
+------------
+ 1987-08-20
+(1 row)
+
+SELECT email FROM core.customers LIMIT 1;
+ERROR:  permission denied for table customers
+UPDATE core.accounts SET balance = 0 WHERE account_id = 1;
+ERROR:  permission denied for table accounts
+RESET ROLE;
+RESET
+SET ROLE support_1;
+SET
+SELECT * FROM core.customers LIMIT 1;
+ERROR:  permission denied for table customers
+RESET ROLE;
+RESET
+SET ROLE bank_app;
+SET
+SELECT * FROM core.accounts LIMIT 1;
+ERROR:  permission denied for table accounts
+RESET ROLE;
+RESET
+SET ROLE auditeur_1;
+SET
+SELECT count(*) FROM audit.audit_log;
+ count 
+-------
+     1
+(1 row)
+
+DELETE FROM audit.audit_log;
+ERROR:  permission denied for table audit_log
+RESET ROLE;
+RESET
+=== E4 : vues ===
+SET ROLE support_1;
+SET
+SELECT * FROM core.v_customers_support LIMIT 3;
+ customer_id | first_name | last_name |       email       |  phone   | kyc_status 
+-------------+------------+-----------+-------------------+----------+------------
+           1 | Emma       | M.        | em***@example.com | ******01 | REJECTED
+           2 | Hugo       | M.        | hu***@example.com | ******02 | VERIFIED
+           3 | Lea        | M.        | le***@example.com | ******03 | VERIFIED
+(3 rows)
+
+UPDATE core.v_accounts_support SET status = 'FROZEN' WHERE account_id = 2;
+UPDATE 1
+UPDATE core.v_accounts_support SET status = 'CLOSED' WHERE account_id = 2;
+ERROR:  new row violates check option for view "v_accounts_support"
+DETAIL:  Failing row contains (status) = (CLOSED).
+UPDATE core.v_accounts_support SET balance = 0 WHERE account_id = 2;
+ERROR:  permission denied for view v_accounts_support
+RESET ROLE;
+RESET
+SELECT account_type, status, nb_comptes FROM core.mv_stats_comptes ORDER BY 1,2;
+ account_type | status | nb_comptes 
+--------------+--------+------------
+ CHECKING     | ACTIVE |      10909
+ CHECKING     | FROZEN |        341
+ SAVINGS      | ACTIVE |       3637
+ SAVINGS      | FROZEN |        113
+(4 rows)
+
+SELECT account_type, status, count(*) FROM core.accounts GROUP BY 1,2 ORDER BY 1,2;
+ account_type | status | count 
+--------------+--------+-------
+ CHECKING     | ACTIVE | 10908
+ CHECKING     | FROZEN |   342
+ SAVINGS      | ACTIVE |  3637
+ SAVINGS      | FROZEN |   113
+(4 rows)
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY core.mv_stats_comptes;
+REFRESH MATERIALIZED VIEW
+SELECT account_type, status, nb_comptes FROM core.mv_stats_comptes ORDER BY 1,2;
+ account_type | status | nb_comptes 
+--------------+--------+------------
+ CHECKING     | ACTIVE |      10908
+ CHECKING     | FROZEN |        342
+ SAVINGS      | ACTIVE |       3637
+ SAVINGS      | FROZEN |        113
+(4 rows)
+
+UPDATE core.accounts SET status = 'ACTIVE' WHERE account_id = 2;
+UPDATE 1
